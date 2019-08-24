@@ -30,6 +30,7 @@ import org.elasticsearch.common.blobstore.BlobContainer;
 import org.elasticsearch.common.blobstore.BlobMetaData;
 import org.elasticsearch.common.blobstore.BlobPath;
 import org.elasticsearch.common.blobstore.BlobStore;
+import org.elasticsearch.common.blobstore.DeleteResult;
 import org.elasticsearch.common.blobstore.fs.FsBlobContainer;
 import org.elasticsearch.common.io.PathUtils;
 import org.elasticsearch.common.settings.Setting;
@@ -52,12 +53,14 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 public class MockRepository extends FsRepository {
     private static final Logger logger = LogManager.getLogger(MockRepository.class);
@@ -310,11 +313,6 @@ public class MockRepository extends FsRepository {
             }
 
             @Override
-            public boolean blobExists(String blobName) {
-                return super.blobExists(blobName);
-            }
-
-            @Override
             public InputStream readBlob(String name) throws IOException {
                 maybeIOExceptionOrBlock(name);
                 return super.readBlob(name);
@@ -333,9 +331,35 @@ public class MockRepository extends FsRepository {
             }
 
             @Override
+            public DeleteResult delete() throws IOException {
+                DeleteResult deleteResult = DeleteResult.ZERO;
+                for (BlobContainer child : children().values()) {
+                    deleteResult = deleteResult.add(child.delete());
+                }
+                final Map<String, BlobMetaData> blobs = listBlobs();
+                long deleteBlobCount = blobs.size();
+                long deleteByteCount = 0L;
+                for (String blob : blobs.values().stream().map(BlobMetaData::name).collect(Collectors.toList())) {
+                    deleteBlobIgnoringIfNotExists(blob);
+                    deleteByteCount += blobs.get(blob).length();
+                }
+                blobStore().blobContainer(path().parent()).deleteBlob(path().toArray()[path().toArray().length - 1]);
+                return deleteResult.add(deleteBlobCount, deleteByteCount);
+            }
+
+            @Override
             public Map<String, BlobMetaData> listBlobs() throws IOException {
                 maybeIOExceptionOrBlock("");
                 return super.listBlobs();
+            }
+
+            @Override
+            public Map<String, BlobContainer> children() throws IOException {
+                final Map<String, BlobContainer> res = new HashMap<>();
+                for (Map.Entry<String, BlobContainer> entry : super.children().entrySet()) {
+                    res.put(entry.getKey(), new MockBlobContainer(entry.getValue()));
+                }
+                return res;
             }
 
             @Override

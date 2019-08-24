@@ -53,22 +53,22 @@ public class DataFrameAuditorIT extends DataFrameRestTestCase {
 
     @SuppressWarnings("unchecked")
     public void testAuditorWritesAudits() throws Exception {
-        String transformId = "simplePivotForAudit";
+        String transformId = "simple_pivot_for_audit";
         String dataFrameIndex = "pivot_reviews_user_id_above_20";
         setupDataAccessRole(DATA_ACCESS_ROLE, REVIEWS_INDEX_NAME, dataFrameIndex);
         String query = "\"match\": {\"user_id\": \"user_26\"}";
 
-        createPivotReviewsTransform(transformId, dataFrameIndex, query, BASIC_AUTH_VALUE_DATA_FRAME_ADMIN_WITH_SOME_DATA_ACCESS);
+        createPivotReviewsTransform(transformId, dataFrameIndex, query, null, BASIC_AUTH_VALUE_DATA_FRAME_ADMIN_WITH_SOME_DATA_ACCESS);
 
         startAndWaitForTransform(transformId, dataFrameIndex, BASIC_AUTH_VALUE_DATA_FRAME_ADMIN_WITH_SOME_DATA_ACCESS);
 
         // Make sure we wrote to the audit
         final Request request = new Request("GET", DataFrameInternalIndex.AUDIT_INDEX + "/_search");
-        request.setJsonEntity("{\"query\":{\"term\":{\"transform_id\":\"simplePivotForAudit\"}}}");
+        request.setJsonEntity("{\"query\":{\"term\":{\"transform_id\":\"simple_pivot_for_audit\"}}}");
         assertBusy(() -> {
             assertTrue(indexExists(DataFrameInternalIndex.AUDIT_INDEX));
         });
-        // Since calls to write the Auditor are sent and forgot (async) we could have returned from the start,
+        // Since calls to write the AbstractAuditor are sent and forgot (async) we could have returned from the start,
         // finished the job (as this is a very short DF job), all without the audit being fully written.
         assertBusy(() -> {
             refreshIndex(DataFrameInternalIndex.AUDIT_INDEX);

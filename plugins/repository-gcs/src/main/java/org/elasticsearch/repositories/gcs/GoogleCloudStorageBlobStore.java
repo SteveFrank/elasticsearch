@@ -19,6 +19,7 @@
 
 package org.elasticsearch.repositories.gcs;
 
+import com.google.api.gax.paging.Page;
 import com.google.cloud.BatchResult;
 import com.google.cloud.ReadChannel;
 import com.google.cloud.WriteChannel;
@@ -30,13 +31,13 @@ import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.Storage.BlobListOption;
 import com.google.cloud.storage.StorageBatch;
 import com.google.cloud.storage.StorageException;
-
 import org.elasticsearch.common.SuppressForbidden;
 import org.elasticsearch.common.blobstore.BlobContainer;
 import org.elasticsearch.common.blobstore.BlobMetaData;
 import org.elasticsearch.common.blobstore.BlobPath;
 import org.elasticsearch.common.blobstore.BlobStore;
 import org.elasticsearch.common.blobstore.BlobStoreException;
+import org.elasticsearch.common.blobstore.DeleteResult;
 import org.elasticsearch.common.blobstore.support.PlainBlobMetaData;
 import org.elasticsearch.common.collect.MapBuilder;
 import org.elasticsearch.core.internal.io.Streams;
@@ -55,6 +56,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
@@ -89,11 +91,6 @@ class GoogleCloudStorageBlobStore implements BlobStore {
     @Override
     public BlobContainer blobContainer(BlobPath path) {
         return new GoogleCloudStorageBlobContainer(path, this);
-    }
-
-    @Override
-    public void delete(BlobPath path) throws IOException {
-        deleteBlobsByPrefix(path.buildAsString());
     }
 
     @Override
@@ -137,26 +134,35 @@ class GoogleCloudStorageBlobStore implements BlobStore {
     Map<String, BlobMetaData> listBlobsByPrefix(String path, String prefix) throws IOException {
         final String pathPrefix = buildKey(path, prefix);
         final MapBuilder<String, BlobMetaData> mapBuilder = MapBuilder.newMapBuilder();
-        SocketAccess.doPrivilegedVoidIOException(() -> {
-            client().get(bucketName).list(BlobListOption.prefix(pathPrefix)).iterateAll().forEach(blob -> {
-                assert blob.getName().startsWith(path);
-                final String suffixName = blob.getName().substring(path.length());
-                mapBuilder.put(suffixName, new PlainBlobMetaData(suffixName, blob.getSize()));
-            });
-        });
+        SocketAccess.doPrivilegedVoidIOException(
+            () -> client().get(bucketName).list(BlobListOption.currentDirectory(), BlobListOption.prefix(pathPrefix)).iterateAll().forEach(
+                blob -> {
+                    assert blob.getName().startsWith(path);
+                    if (blob.isDirectory() == false) {
+                        final String suffixName = blob.getName().substring(path.length());
+                        mapBuilder.put(suffixName, new PlainBlobMetaData(suffixName, blob.getSize()));
+                    }
+                }));
         return mapBuilder.immutableMap();
     }
 
-    /**
-     * Returns true if the blob exists in the specific bucket
-     *
-     * @param blobName name of the blob
-     * @return true iff the blob exists
-     */
-    boolean blobExists(String blobName) throws IOException {
-        final BlobId blobId = BlobId.of(bucketName, blobName);
-        final Blob blob = SocketAccess.doPrivilegedIOException(() -> client().get(blobId));
-        return blob != null;
+    Map<String, BlobContainer> listChildren(BlobPath path) throws IOException {
+        final String pathStr = path.buildAsString();
+        final MapBuilder<String, BlobContainer> mapBuilder = MapBuilder.newMapBuilder();
+        SocketAccess.doPrivilegedVoidIOException
+            (() -> client().get(bucketName).list(BlobListOption.currentDirectory(), BlobListOption.prefix(pathStr)).iterateAll().forEach(
+                blob -> {
+                    if (blob.isDirectory()) {
+                        assert blob.getName().startsWith(pathStr);
+                        assert blob.getName().endsWith("/");
+                        // Strip path prefix and trailing slash
+                        final String suffixName = blob.getName().substring(pathStr.length(), blob.getName().length() - 1);
+                        if (suffixName.isEmpty() == false) {
+                            mapBuilder.put(suffixName, new GoogleCloudStorageBlobContainer(path.add(suffixName), this));
+                        }
+                    }
+                }));
+        return mapBuilder.immutableMap();
     }
 
     /**
@@ -292,12 +298,29 @@ class GoogleCloudStorageBlobStore implements BlobStore {
     }
 
     /**
-     * Deletes multiple blobs from the specific bucket all of which have prefixed names
+     * Deletes the given path and all its children.
      *
-     * @param prefix prefix of the blobs to delete
+     * @param pathStr Name of path to delete
      */
-    private void deleteBlobsByPrefix(String prefix) throws IOException {
-        deleteBlobsIgnoringIfNotExists(listBlobsByPrefix("", prefix).keySet());
+    DeleteResult deleteDirectory(String pathStr) throws IOException {
+        return SocketAccess.doPrivilegedIOException(() -> {
+            DeleteResult deleteResult = DeleteResult.ZERO;
+            Page<Blob> page = client().get(bucketName).list(BlobListOption.prefix(pathStr));
+            do {
+                final Collection<String> blobsToDelete = new ArrayList<>();
+                final AtomicLong blobsDeleted = new AtomicLong(0L);
+                final AtomicLong bytesDeleted = new AtomicLong(0L);
+                page.getValues().forEach(b -> {
+                    blobsToDelete.add(b.getName());
+                    blobsDeleted.incrementAndGet();
+                    bytesDeleted.addAndGet(b.getSize());
+                });
+                deleteBlobsIgnoringIfNotExists(blobsToDelete);
+                deleteResult = deleteResult.add(blobsDeleted.get(), bytesDeleted.get());
+                page = page.getNextPage();
+            } while (page != null);
+            return deleteResult;
+        });
     }
 
     /**
@@ -307,11 +330,6 @@ class GoogleCloudStorageBlobStore implements BlobStore {
      */
     void deleteBlobsIgnoringIfNotExists(Collection<String> blobNames) throws IOException {
         if (blobNames.isEmpty()) {
-            return;
-        }
-        // for a single op submit a simple delete instead of a batch of size 1
-        if (blobNames.size() == 1) {
-            deleteBlob(blobNames.iterator().next());
             return;
         }
         final List<BlobId> blobIdsToDelete = blobNames.stream().map(blob -> BlobId.of(bucketName, blob)).collect(Collectors.toList());
@@ -343,6 +361,7 @@ class GoogleCloudStorageBlobStore implements BlobStore {
         if (e != null) {
             throw new IOException("Exception when deleting blobs [" + failedBlobs + "]", e);
         }
+        assert failedBlobs.isEmpty();
     }
 
     private static String buildKey(String keyPath, String s) {

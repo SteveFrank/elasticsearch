@@ -24,7 +24,6 @@ import org.elasticsearch.env.Environment;
 import org.elasticsearch.env.TestEnvironment;
 import org.elasticsearch.index.analysis.AnalysisRegistry;
 import org.elasticsearch.test.ESTestCase;
-import org.elasticsearch.test.junit.annotations.TestLogging;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.xpack.core.ml.job.config.AnalysisConfig;
 import org.elasticsearch.xpack.core.ml.job.config.DataDescription;
@@ -53,7 +52,8 @@ import org.elasticsearch.xpack.ml.job.process.autodetect.params.DataLoadParams;
 import org.elasticsearch.xpack.ml.job.process.autodetect.params.FlushJobParams;
 import org.elasticsearch.xpack.ml.job.process.autodetect.params.TimeRange;
 import org.elasticsearch.xpack.ml.job.process.normalizer.NormalizerFactory;
-import org.elasticsearch.xpack.ml.notifications.Auditor;
+import org.elasticsearch.xpack.ml.notifications.AnomalyDetectionAuditor;
+import org.elasticsearch.xpack.ml.process.NativeStorageProvider;
 import org.junit.Before;
 import org.mockito.ArgumentCaptor;
 
@@ -118,9 +118,10 @@ public class AutodetectProcessManagerTests extends ESTestCase {
     private AutodetectCommunicator autodetectCommunicator;
     private AutodetectProcessFactory autodetectFactory;
     private NormalizerFactory normalizerFactory;
-    private Auditor auditor;
+    private AnomalyDetectionAuditor auditor;
     private ClusterState clusterState;
     private ClusterService clusterService;
+    private NativeStorageProvider nativeStorageProvider;
 
     private DataCounts dataCounts = new DataCounts("foo");
     private ModelSizeStats modelSizeStats = new ModelSizeStats.Builder("foo").build();
@@ -147,7 +148,7 @@ public class AutodetectProcessManagerTests extends ESTestCase {
         autodetectCommunicator = mock(AutodetectCommunicator.class);
         autodetectFactory = mock(AutodetectProcessFactory.class);
         normalizerFactory = mock(NormalizerFactory.class);
-        auditor = mock(Auditor.class);
+        auditor = mock(AnomalyDetectionAuditor.class);
         clusterService = mock(ClusterService.class);
         ClusterSettings clusterSettings =
             new ClusterSettings(Settings.EMPTY, Collections.singleton(MachineLearning.MAX_OPEN_JOBS_PER_NODE));
@@ -159,6 +160,7 @@ public class AutodetectProcessManagerTests extends ESTestCase {
         clusterState = mock(ClusterState.class);
         when(clusterState.getMetaData()).thenReturn(metaData);
         when(clusterState.metaData()).thenReturn(metaData);
+        nativeStorageProvider = mock(NativeStorageProvider.class);
 
         doAnswer(invocationOnMock -> {
             @SuppressWarnings("unchecked")
@@ -332,9 +334,6 @@ public class AutodetectProcessManagerTests extends ESTestCase {
         assertEquals(0, manager.numberOfOpenJobs());
     }
 
-    // DEBUG logging makes it possible to see exactly how the two threads
-    // interleaved in the AutodetectProcessManager.close() call
-    @TestLogging("org.elasticsearch.xpack.ml.job.process.autodetect:DEBUG")
     public void testCanCloseClosingJob() throws Exception {
         AtomicInteger numberOfCommunicatorCloses = new AtomicInteger(0);
         doAnswer(invocationOnMock -> {
@@ -685,9 +684,8 @@ public class AutodetectProcessManagerTests extends ESTestCase {
 
     private AutodetectProcessManager createManager(Settings settings) {
         return new AutodetectProcessManager(environment, settings,
-            client, threadPool, jobManager, jobResultsProvider, jobResultsPersister, jobDataCountsPersister,
-            autodetectFactory, normalizerFactory,
-            new NamedXContentRegistry(Collections.emptyList()), auditor, clusterService);
+            client, threadPool, new NamedXContentRegistry(Collections.emptyList()), auditor, clusterService, jobManager, jobResultsProvider,
+            jobResultsPersister, jobDataCountsPersister, autodetectFactory, normalizerFactory, nativeStorageProvider);
     }
     private AutodetectProcessManager createSpyManagerAndCallProcessData(String jobId) {
         AutodetectProcessManager manager = createSpyManager();

@@ -78,11 +78,6 @@ public class ReindexDocumentationIT extends ESIntegTestCase {
         return Arrays.asList(ReindexPlugin.class, ReindexCancellationPlugin.class);
     }
 
-    @Override
-    protected Collection<Class<? extends Plugin>> transportClientPlugins() {
-        return Collections.singletonList(ReindexPlugin.class);
-    }
-
     @Before
     public void setup() {
         client().admin().indices().prepareCreate(INDEX_NAME).get();
@@ -121,13 +116,16 @@ public class ReindexDocumentationIT extends ESIntegTestCase {
               new UpdateByQueryRequestBuilder(client, UpdateByQueryAction.INSTANCE);
             updateByQuery.source("source_index")
                 .filter(QueryBuilders.termQuery("level", "awesome"))
-                .size(1000)
+                .maxDocs(1000)
                 .script(new Script(ScriptType.INLINE,
-                    "ctx._source.awesome = 'absolutely'",
                     "painless",
+                    "ctx._source.awesome = 'absolutely'",
                     Collections.emptyMap()));
             BulkByScrollResponse response = updateByQuery.get();
             // end::update-by-query-filter
+
+            // validate order of string params to Script constructor
+            assertEquals(updateByQuery.request().getScript().getLang(), "painless");
         }
         {
             // tag::update-by-query-size
@@ -144,7 +142,7 @@ public class ReindexDocumentationIT extends ESIntegTestCase {
             UpdateByQueryRequestBuilder updateByQuery =
                new UpdateByQueryRequestBuilder(client, UpdateByQueryAction.INSTANCE);
             updateByQuery.source("source_index")
-                .size(100)
+                .maxDocs(100)
                 .source()
                 .addSort("cat", SortOrder.DESC);
             BulkByScrollResponse response = updateByQuery.get();
@@ -157,16 +155,19 @@ public class ReindexDocumentationIT extends ESIntegTestCase {
             updateByQuery.source("source_index")
                 .script(new Script(
                     ScriptType.INLINE,
+                    "painless",
                     "if (ctx._source.awesome == 'absolutely') {"
                         + "  ctx.op='noop'"
                         + "} else if (ctx._source.awesome == 'lame') {"
                         + "  ctx.op='delete'"
                         + "} else {"
                         + "ctx._source.awesome = 'absolutely'}",
-                    "painless",
                     Collections.emptyMap()));
             BulkByScrollResponse response = updateByQuery.get();
             // end::update-by-query-script
+
+            // validate order of string params to Script constructor
+            assertEquals(updateByQuery.request().getScript().getLang(), "painless");
         }
         {
             // tag::update-by-query-multi-index
